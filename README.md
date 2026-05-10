@@ -53,6 +53,11 @@ To prevent crushing the database with 55k individual queries per second:
 *   **Bulk Fetch**: The Kafka consumer pulls 5,000 messages at once. It extracts the IDs and executes exactly **one** `SELECT * FROM pg_transactions WHERE transaction_id IN (...) AND is_reconciled = FALSE`.
 *   **Bulk Insert/Update**: Once matched in Java RAM, results are saved using Spring's `JdbcTemplate.batchUpdate`. We added `rewriteBatchedStatements=true` to the MySQL JDBC URL, which compresses the 5,000 inserts into a single network packet, boosting throughput by up to 10x.
 
+### 4. Data Structure Optimization (Micro-Optimizations at Scale)
+When processing 200 million transactions, standard object allocation overhead becomes a major bottleneck. For our O(1) in-memory matching map (`Map<String, List<PgTransaction>>`), we explicitly use `ArrayList` instead of `LinkedList`:
+*   **Memory Allocation:** A `LinkedList` requires allocating a new `Node` wrapper object for every single entry. For 200M transactions, this generates 200M unnecessary objects, triggering severe Garbage Collection (GC) pauses. `ArrayList` uses flat, contiguous arrays.
+*   **CPU Cache Locality:** Iterating through a `LinkedList` to find partial refund amounts causes CPU cache misses because nodes are scattered in memory. `ArrayList` elements are contiguous, allowing the CPU to pre-fetch them into the L1/L2 cache instantly.
+
 ---
 
 ## 🛡 Robustness & Concurrency Solutions
@@ -61,7 +66,7 @@ Financial reconciliation introduces critical race conditions and logical hurdles
 
 ### The Multi-Capture / Partial Refund Problem
 **The Issue:** A single `transaction_id` might correspond to 1 Capture and multiple Partial Refunds (e.g., $10, $20, $5). If a client uploads their refund records out-of-order, a naive queue might mistakenly compare the client's $20 refund against the PG's $10 refund and trigger an immediate `AMOUNT_MISMATCH`.
-**The Solution:** Our in-memory matching algorithm groups the bulk-fetched PG transactions into a `LinkedList`. Before popping a match, it iterates through the list looking for an **exact amount match**. This guarantees that out-of-order partial refunds pair with their exact counterpart safely.
+**The Solution:** Our in-memory matching algorithm groups the bulk-fetched PG transactions into an `ArrayList`. Before extracting a match, it iterates through the list looking for an **exact amount match**. This guarantees that out-of-order partial refunds pair with their exact counterpart safely.
 
 ### The Double-Matching Bug
 **The Issue:** If a client accidentally uploads the same refund file twice, or two partial refunds with identical amounts arrive simultaneously, two separate worker threads might fetch the same PG record and successfully reconcile it twice. Result: 1 PG refund matched to 2 Client refunds.

@@ -39,12 +39,10 @@ public class ReconciliationService {
         List<PgTransaction> pgTransactions = reconciliationRepository.findByTransactionIds(transactionIdsToFetch);
 
         // 3. Group PG transactions by transactionId + type for O(1) in-memory lookup
-        // We use a Queue or List so we can pop them off as they are matched (handling
-        // multiple refunds)
-        Map<String, LinkedList<PgTransaction>> pgTxnMap = new HashMap<>();
+        Map<String, List<PgTransaction>> pgTxnMap = new HashMap<>();
         for (PgTransaction pgTxn : pgTransactions) {
             String key = pgTxn.getTransactionId() + "_" + pgTxn.getType().name();
-            pgTxnMap.computeIfAbsent(key, k -> new LinkedList<>()).add(pgTxn);
+            pgTxnMap.computeIfAbsent(key, k -> new ArrayList<>(2)).add(pgTxn);
         }
 
         // 4. Perform In-Memory Matching
@@ -54,7 +52,7 @@ public class ReconciliationService {
         for (Transaction clientTxn : incomingTransactions) {
             String key = clientTxn.getTransactionId() + "_" + clientTxn.getType().name();
 
-            LinkedList<PgTransaction> potentialMatches = pgTxnMap.get(key);
+            List<PgTransaction> potentialMatches = pgTxnMap.get(key);
 
             ReconciledTransaction.ReconciledTransactionBuilder builder = ReconciledTransaction.builder()
                     .id(UUID.randomUUID().toString())
@@ -84,7 +82,7 @@ public class ReconciliationService {
                     pgTransactionIdsToMarkAsReconciled.add(matchedPg.getId());
                 } else {
                     // No exact amount match found, just take the first available one to record the mismatch
-                    matchedPg = potentialMatches.poll();
+                    matchedPg = potentialMatches.remove(0);
                     builder.pgTransactionId(matchedPg.getId())
                             .pgAmount(matchedPg.getAmount())
                             .reconciliationStatus("AMOUNT_MISMATCH");
